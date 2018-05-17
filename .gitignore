@@ -1,0 +1,27 @@
+.idea/
+.bin/
+logs/
+.DS_Store
+*.log
+workspace.xml
+node_modules
+*.iml
+manifest.json
+coverage
+doc
+.*.sw?
+npm-debug.log
+newrelic_agent.log
+npm-debug.log.*
+*.sublime-*
+.floo*
+.history/
+
+# Elastic Beanstalk Files
+.elasticbeanstalk/*
+!.elasticbeanstalk/*.cfg.yml
+!.elasticbeanstalk/*.global.yml
+
+.imdone/
+tmp/
+dist/
