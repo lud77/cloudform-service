@@ -1,0 +1,22 @@
+{
+  "Description": "test-service",
+  "ServiceName": "test-service",
+  "Family": "test",
+  "ImageName": "test",
+  "Cluster": "MyCluster",
+  "Environments": [
+    {
+      "Env": "dev",
+      "Certificate": "x1",
+      "HostedZoneName": "y1.com"
+    },
+    {
+      "Env": "prod",
+      "Certificate": "x2",
+      "HostedZoneName": "y2.com"
+    }
+  ],
+  "HostedZoneId": "xyz",
+  "Certificate": "certificate-name",
+  "Port": 8080
+}

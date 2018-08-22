@@ -1,0 +1,257 @@
+---
+Description: {{Description}}
+
+Parameters:
+
+  Cluster:
+    Type: String
+    Default: {{Cluster}}
+
+  EnvironmentSuffix:
+    Type: String
+    AllowedValues:
+    {{#each Environments}}
+      - {{Env}}
+    {{/each}}
+
+  Version:
+    Type: String
+
+Mappings:
+  Environments:
+  {{#each Environments}}
+    {{Env}}:
+      Certificate: {{Certificate}}
+      HostedZoneName: {{HostedZoneName}}
+  {{/each}}
+
+Resources:
+
+  RecordSet:
+    Type: AWS::Route53::RecordSet
+    DependsOn:
+      - LoadBalancer
+    Properties:
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        EvaluateTargetHealth: false
+        HostedZoneId: {{HostedZoneId}}
+      HostedZoneName: !Sub
+        - ${HostedName}.
+        - HostedName: !FindInMap [Environments, !Ref EnvironmentSuffix, HostedZoneName]
+      Name: !Sub
+        - {{ServiceName}}-${EnvironmentSuffix}.${HostedName}
+        - HostedName: !FindInMap [Environments, !Ref EnvironmentSuffix, HostedZoneName]
+          Acc: !Ref EnvironmentSuffix
+      Type: A
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/ecs/{{ServiceName}}-${EnvironmentSuffix}
+      RetentionInDays: 30
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: {{Family}}
+      ContainerDefinitions:
+        - Name: !Sub {{ServiceName}}-${EnvironmentSuffix}
+          Essential: true
+          Image: !Sub {{ImageName}}:${Version}
+          Memory: 512
+          MemoryReservation: 512
+          PortMappings:
+            - ContainerPort: {{Port}}
+              HostPort: 0
+          Cpu: 512
+          Environment:
+            - Name: NODE_ENV
+              Value: !Ref EnvironmentSuffix
+          Hostname: !Sub {{ServiceName}}-${EnvironmentSuffix}
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Sub /aws/ecs/{{ServiceName}}-${EnvironmentSuffix}
+              awslogs-region: eu-west-1
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Subnets:
+        - !ImportValue SubnetAppPublicA
+        - !ImportValue SubnetAppPublicB
+        - !ImportValue SubnetAppPublicC
+      SecurityGroups:
+        - !ImportValue sgLoadBalancer
+
+  HttpLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - LoadBalancer
+      - TargetGroup
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  HttpsLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - LoadBalancer
+      - TargetGroup
+    Properties:
+      Certificates:
+        - CertificateArn: !ImportValue {{Certificate}}
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !ImportValue VPCID
+      Port: 80
+      Protocol: HTTP
+      Matcher:
+          HttpCode: 200-399
+      HealthCheckIntervalSeconds: 120
+      HealthCheckPath: /healthcheck
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 5
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - HttpLoadBalancerListener
+      - HttpsLoadBalancerListener
+    Properties:
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 50
+      Cluster: !Ref Cluster
+      Role: !ImportValue rlDefaultECSServiceArn
+      DesiredCount: 3
+      PlacementStrategies:
+        - Field: attribute:ecs.availability-zone
+          Type: spread
+      TaskDefinition: !Ref TaskDefinition
+      LoadBalancers:
+        - ContainerName: !Sub {{ServiceName}}-${EnvironmentSuffix}
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-Autoscaling-Role-${EnvironmentSuffix}
+      Path: "/"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+            - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - application-autoscaling.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn:
+      - AutoScalingRole
+    Properties:
+      MaxCapacity: 10
+      MinCapacity: 3
+      ResourceId:
+        Fn::Sub:
+          - service/${ClusterName}/${ServiceName}
+          - ServiceName: !GetAtt Service.Name
+            ClusterName: !Ref Cluster
+      RoleARN: !GetAtt AutoScalingRole.Arn
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+
+  ScalingPolicyCPUHigh:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-CPUHigh-${EnvironmentSuffix}
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 120
+        MetricAggregationType: Average
+        StepAdjustments:
+        - MetricIntervalLowerBound: 0
+          ScalingAdjustment: 1
+
+  ScalingPolicyCPULow:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub ${AWS::StackName}-CPULow-${EnvironmentSuffix}
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ChangeInCapacity
+        Cooldown: 120
+        MetricAggregationType: Average
+        StepAdjustments:
+        - MetricIntervalUpperBound: 0
+          ScalingAdjustment: -1
+
+  ClusterCPUUtilAlarmScaleOut:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: Service
+    Properties:
+      EvaluationPeriods: 3
+      Statistic: Average
+      Threshold: 67
+      AlarmDescription: Alarm if Service CPU is too high
+      Period: 60
+      AlarmActions:
+        - !Ref ScalingPolicyCPUHigh
+      Namespace: AWS/ApplicationELB
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt Service.Name
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      MetricName: CPUUtilization
+
+  ClusterCPUUtilAlarmScaleIn:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: Service
+    Properties:
+      EvaluationPeriods: 15
+      Statistic: Average
+      Threshold: 33
+      AlarmDescription: Alarm if Service CPU is too low
+      Period: 60
+      AlarmActions:
+        - !Ref ScalingPolicyCPULow
+      Namespace: AWS/ApplicationELB
+      Dimensions:
+        - Name: ServiceName
+          Value: !GetAtt Service.Name
+      ComparisonOperator: LessThanOrEqualToThreshold
+      MetricName: CPUUtilization
+
+Outputs:
+  EnvironmentDNSName:
+    Description: {{Description}}
+    Value: !Sub
+      - {{ServiceName}}-${EnvironmentSuffix}-ecs.${HostedName}
+      - HostedName: !FindInMap [Environments, !Ref EnvironmentSuffix, HostedZoneName]
+        Acc: !Ref EnvironmentSuffix
